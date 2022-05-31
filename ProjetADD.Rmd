@@ -1,0 +1,296 @@
+---
+title: "Analyse de données : Meteorite Landings"
+author: "Jonathan Ferreira"
+output: pdf_document
+---
+
+```{r, include=FALSE, results='hide', message=FALSE}
+#install.packages("tidyverse")
+#install.packages("ggplot2")
+#install.packages("tmap")
+#install.packages("hexbin")
+#install.packages("tm")
+#install.packages("gganimate")
+#install.packages("gifski")
+#install.packages("av")
+#install.packages("gridExtra")
+#install.packages("lubridate")
+#install.packages("rvest")
+#install.packages("jpeg")
+```
+
+
+```{r, include=FALSE, results='hide', message=FALSE}
+library(tidyverse)
+library(hexbin)
+library(tmap)
+library(ggplot2)
+library(tm)
+library(gganimate)
+library(gifski)
+library(av)
+library(gridExtra)
+library(lubridate)
+library(rvest)
+library(jpeg)
+```
+
+## Carte du monde avec météorites.
+
+On commence par récuperer le jeu de données dans une variable qu'on nommera `didou`.
+
+```{r, message=FALSE}
+didou <- read_csv(
+    "Meteorite.csv")
+
+print(didou, width = Inf)
+```
+
+On cherche les valeurs absurdes dans les colonnes `reclat` et `reclong` représentants les coordonnées en lattitude et longitude, et on les remplace par des `NA`.
+
+```{r, message=FALSE}
+didou <- didou %>%
+  mutate(reclat = ifelse(reclat > 90 | reclat < -90, NA, reclat)) %>%
+  mutate(reclong = ifelse(reclong > 180 | reclong < -180, NA, reclong))
+```
+
+On vérifie qu'à chaque fois que la colonne `reclat` et la colonne `reclong` sont égales à `0`, la colonne `GeoLocalisation` est bien égale à `(0.0, 0.0)`.
+
+```{r, message=FALSE}
+#Ici on vérifie l'inverse
+didou %>%
+  filter(reclat == 0 & reclong == 0 & GeoLocation != "(0.0, 0.0)") %>%
+  nrow()
+```
+On cherche maintenant à savoir combien de météorites sont répertoriées aux coordonnées `(0.0, 0.0)`.
+
+```{r, message=FALSE}
+nbrzero <- didou %>%
+  filter(GeoLocation == "(0.0, 0.0)") %>%
+  nrow()
+```
+
+On remarque que `r nbrzero` météorites sont répertoriées en `(0.0, 0.0)`. On cherche à vérifier si c'est la véritable coordonnées des météorites, sinon on remplacera par des `NA`. \
+Le nom des météorites est défini par un lieu de découverte et un nombre s'il y a plusieurs météorites associées à un même lieu, grâce à la fonction `unique` et en ignorant les numéros, on peut donc faire ressortir les lieux où ces météorites ont été découvertes.
+
+```{r, message=FALSE}
+#didou <- didou %>%
+#  filter(reclat == 0 & reclong == 0) %>%
+#  summarize(where = unique(sub("[0-9]+", "", name))) %>% 
+#  unique()
+
+#OU
+
+didou %>%
+  filter(GeoLocation == "(0.0, 0.0)") %>%
+  summarize(where = str_replace_all(name, "[:digit:]", "")) %>%
+  unique()
+```
+
+On voit que ces lieux ne sont pas en (0.0, 0.0), donc on peut bien les remplacer par des `NA`.
+
+```{r, results='hide', message=FALSE}
+didou <- didou %>%
+  mutate(reclat = ifelse(GeoLocation == "(0.0, 0.0)", NA, reclat)) %>%
+  mutate(reclong = ifelse(GeoLocation == "(0.0, 0.0)", NA, reclong)) %>%
+  mutate(GeoLocation = ifelse(GeoLocation == "(0.0, 0.0)", NA, GeoLocation))
+```
+
+On cherche maintenant à faire une représentation graphiques à partir des données récupérées. \
+
+On importe une carte du monde afin d'y positionner les météorites.
+
+```{r, results='hide', message=FALSE}
+worldmap <- ggplot() +
+  geom_polygon(data = map_data("world"), 
+               mapping = aes(long, lat, group = group),
+               fill = "white", colour = "grey") +
+  xlab("Longitude") + ylab("Lattitude")
+```
+
+On marque les positions des météorites à l'aide d'un `geom_point`.
+
+```{r, warning=FALSE}
+worldmap +
+  geom_point(data = didou, mapping = aes(x = reclong, y = reclat),
+             colour = 'darkblue', size = 0.1) +
+  labs(title = "Carte du monde avec météorites")
+```
+
+## Animation d'une carte du monde avec lieu d'impact des météorites dans le temps.
+
+On va maintenant faire une animation dans le temps, des météorites dont on connait la date d'impact.
+
+On remarque d'abord que le nom de colonne `mass (g)` posera problème, on renomme donc la colonne en `mass` et on rapellera l'unité dans les graphiques. \ 
+Puis, on formate la colonne `year`, car le jour/mois et l'heure n'ont ici aucune valeur (toujours la même : 1er Janvier à 12AM, sauf erreur (ou cas spécifique ?)), On vérifiera aussi qu'il n'y a pas de valeurs absurdes (année plus grande que l'année en cours).
+
+```{r}
+colnames(didou)[5] <- "mass"
+
+#On veut voir quels météorites n'ont pas été enregistré au 1er Janvier à 12AM
+didou %>%
+  filter(!str_detect(year, "01/01.+12:00:00 AM"))
+
+didou <- didou %>%
+  mutate(year = as.integer((year(mdy_hms(didou$year))))) %>%
+  mutate(year = ifelse(year > as.numeric(format(Sys.Date(), "%Y")), NA, year))
+```
+
+On utilisera le poids `mass` de la météorite comme taille du point.\ 
+On choisi aussi d'utiliser la composition de la météorite comme code couleur, il en existe 3 types : `Stony` `Irony` `Stony-Iron`. Dans la colonne `recclass`, uniquement le sous-type est donné, il en existe beaucoup trop pour que le graphique soit clair, on utilisera donc la fonction `mutate` pour créer une nouvelle colonne qui contient le type principal associé à chaque météorite.
+
+```{r}
+didou <- didou %>%
+  mutate(colorclass = ifelse(grepl("Stone|CI|CM|CO|CV|CK|CR|CH|CB|H|L|LL|EH|EL|R|K|URE|BRA|
+                                   ACA|LOD|WIN|ANG|AUB|EUC|DIO|HOW|MOON|SHE|NAK|CHA|OPX|Diogenite
+                                   |Eucrite", recclass), "Stony", NA)) %>%
+  mutate(colorclass = ifelse(grepl("Iron|IAB|IIICD|IC|IIAB|IIC|IID|IIE|IIIAB|IIIE|IIIF|IVA|
+                                   IVB", recclass), "Irony", colorclass)) %>%
+  mutate(colorclass = ifelse(grepl("Pallasite|MES|ES|PAL|PP", recclass), "Stony-Iron", colorclass))
+
+print(didou, width = Inf)
+```
+
+ On se limitera de l'année 1900 à l'année 2015.
+
+```{r, warning=FALSE, eval = FALSE}
+didoufell <- didou %>%
+  filter(fall == "Fell") %>%
+  filter(year >= 1900)
+
+mapanimated <- worldmap +
+  geom_point(data = didoufell, mapping = aes(x = reclong, y = reclat, 
+                                             size = mass,
+                                             colour = colorclass)) +
+  scale_size_binned(breaks = c(1e3, 1e4, 1e6, 1e7)) +
+  transition_time(year) +
+  labs(title = "Year: {frame_time}") +
+  labs(colour = "Classification") +
+  labs(size = "Mass in g") +
+  shadow_mark(past = T, future=F, alpha=0.3)
+
+animate(mapanimated
+        #On peut "allonger" la vidéo en modifiant le paramètres `duration`,
+        #qui représente la durée du gif en secondes
+        #, duration = 15
+        )
+
+#Si on préfère avoir une vidéo, mais on peut rencontrer des problèmes avec
+#des solutions différentes en fonction de l'OS ...
+#animate(mapanimated, renderer = av_renderer())
+```
+
+```{r}
+knitr::include_graphics("mapanimated.mp4")
+```
+
+
+
+## Histogrammes de proportions en fonction du statut et du poids des météorites.
+
+On peut faire un histogramme pour évaluer la répartition des météorites en fonction leur statut `fall` et de leur poids `mass`. \ 
+On écrira une fonction `funhist` pour simplifier le code. \ 
+Ici, on fera deux histogrammes de proportions, allant de 0g à 10000g.
+
+```{r}
+funhist <- function(chr, a, b) {
+  ggplot() +
+    geom_histogram(data = didou %>% 
+                     filter(fall == chr) %>% 
+                     filter(mass >= a) %>% filter(mass <= b),
+               mapping = aes(x = mass, y=..count../sum(..count..)),
+               bins = 10, fill = ifelse(chr == "Found", "aquamarine1","cornflowerblue"),
+               colour = "black") +
+    labs(title = str_c(chr, " Only"),x = "grams", y = NULL)
+}
+
+grid.arrange(funhist("Found", 0, 10000), 
+             funhist("Fell", 0, 10000), 
+             ncol = 2, top = "Repartition en proportion, de 0g à 10000g")
+```
+
+On peut se demander si la répartition entre 1000g et 10000g est plus semblable, on va donc faire deux histogrammes en se limitant à ces valeurs.
+
+```{r}
+grid.arrange(funhist("Found", 1000, 10000), 
+             funhist("Fell", 1000, 10000), 
+             ncol = 2, top = "Repartition en proportion, de 1000g à 10000g")
+```
+
+## Repartition des météorites en fonction de leur classe et de leur poids.
+
+On peut utiliser la fonction `geom_bin2d` du package `ggplot2` pour évaluer la répartition des météorites en fonction leur classe `colorclass` et de leur poids `mass`. \ 
+On écrira une fonction `funbin` pour simplifier le code. \ 
+Ici, on fera deux `geom_bin2d`, allant de 0g à 10000g.
+
+```{r, warning=FALSE}
+funbin <- function(chr, a, b) {
+  ggplot() +
+    geom_bin2d(data = didou %>% 
+                 filter(colorclass == chr) %>% 
+                 filter(mass >= a) %>% filter(mass <= b),
+               mapping = aes(x = colorclass, y = mass)) +
+    scale_y_log10() +
+    labs(x = NULL, y = NULL)
+}
+
+grid.arrange(funbin("Stony", 0, 10000), 
+             funbin("Irony", 0, 10000), 
+             funbin("Stony-Iron", 0, 10000), 
+             ncol = 3, top = "Repartition de 0g à 10000g")
+```
+
+## Rvest, affichage d'une photo de la météorite choisie, si disponible sur internet.
+
+
+```{r}
+DarkMagic <- function(id){
+  url <- "http://encyclopedia-of-meteorites.com/"
+  php <- "Meteorite?id="
+  paste0(url, php, id, collapse = '')
+
+  imgsrc <- read_html(paste0(url, php, id, collapse = '')) %>%
+  html_node(xpath = '//*[(((count(preceding-sibling::*) + 1) = 4) and 
+            parent::*)]//*[contains(concat( " ", @class, " " ), 
+            concat( " ", "img-responsive", " " ))]') %>%
+  html_attr('src')
+  
+  typ <- tail(str_split(imgsrc,"[.]")[[1]], 1)
+  
+  if(is.na(imgsrc)){
+    print(str_c("Pas d'images de la météorite ", 
+                didou$name[didou$id == id], 
+                " (id : "
+                , id, 
+                ") dans l'encyclopédie des météorites. (encyclopedia-of-meteorites.com)"))
+  }else{
+    dwnld <- paste0(url, imgsrc, collapse = '')
+    download.file(dwnld,str_c(id,'.',typ), mode = 'wb')
+
+    knitr::include_graphics(str_c(id,'.',typ))
+  }
+}
+```
+
+```{r}
+DarkMagic(42)
+```
+
+Affichage d'une photo de la météorite `r didou$name[didou$id == 16988]`, découverte (et dont la chute a été vue) en `r didou$year[didou$id == 16988]` au japon, aux coordonées : `r didou$GeoLocation[didou$id == 16988]`, et de catégorie `r didou$colorclass[didou$id == 16988]`.
+
+```{r}
+DarkMagic(16988)
+```
+
+Affichage d'une photo de la météorite `r didou$name[didou$id == 11890]` d'un poids de `r didou$mass[didou$id == 11890]`g, trouvée en `r didou$year[didou$id == 11890]` aux coordonées : `r didou$GeoLocation[didou$id == 11890]` (Namibie), et de catégorie `r didou$colorclass[didou$id == 11890]`.
+
+```{r}
+DarkMagic(11890)
+```
+
+Affichage d'une photo de la météorite `r didou$name[didou$id == 23510]` d'un poids de `r didou$mass[didou$id == 23510]`g, trouvée en `r didou$year[didou$id == 23510]` aux coordonées : `r didou$GeoLocation[didou$id == 23510]` (Russie), et de catégorie `r didou$colorclass[didou$id == 23510]`.
+
+```{r}
+DarkMagic(23510)
+```
+
